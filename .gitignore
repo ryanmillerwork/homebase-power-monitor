@@ -1,0 +1,39 @@
+# Build artifacts
+build/
+cmake-build*/
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Testing/
+Makefile
+cmake_install.cmake
+install_manifest.txt
+_compile_commands.json
+compile_commands.json
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+*.exe
+*.map
+*.bin
+*.elf
+*.hex
+*.uf2
+
+# VSCode / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Pico SDK submodules or vendor dirs (if any)
+**/pico-sdk/**
+**/tinyusb/**
+
+# Logs
+*.log
