@@ -23,6 +23,7 @@ compile_commands.json
 *.elf
 *.hex
 *.uf2
+!power_monitor.uf2
 
 # VSCode / editors
 .vscode/
