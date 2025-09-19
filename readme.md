@@ -37,6 +37,26 @@ ls -l /dev/serial/by-id | grep power_monitor
 ```
 This typically yields a symlink like `/dev/serial/by-id/usb-Homebase_power_monitor_*-if00` that points to the active `/dev/ttyACM*`. Use that symlink in your scripts for a stable identifier.
 
+#### Tcl helper to locate the device
+```tcl
+proc find_power_monitor {} {
+  set links [glob -nocomplain -types l /dev/serial/by-id/*]
+  foreach l $links {
+    if {[string match *power_monitor* [file tail $l]]} { return $l }
+    if {![catch {file readlink $l} target] && [string match *power_monitor* $target]} { return $l }
+  }
+  return ""
+}
+
+set port [find_power_monitor]
+if {$port eq ""} {
+  puts stderr "power_monitor not found under /dev/serial/by-id (looking for *power_monitor*)."
+  puts stderr "Tip: ls -l /dev/serial/by-id | grep power_monitor"
+  exit 1
+}
+puts $port
+```
+
 ### JSON Protocol
 - Each request is a single JSON object containing either a `get` or a `set` key, not both.
 - Responses are single-line JSON objects.
