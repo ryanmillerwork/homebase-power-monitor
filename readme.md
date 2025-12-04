@@ -19,9 +19,10 @@ This firmware uses the Raspberry Pi Pico SDK. Build as a standard RP2040 project
 ### Connecting
 The device enumerates as a USB CDC serial port (e.g., `/dev/ttyACM0` on Linux). You can interact with it using a serial terminal. Examples below use `screen` and `jq` for readability; USB CDC ignores baud settings.
 
-Open a session:
+Open a session and exit:
 ```bash
-screen /dev/ttyACM0 115200
+screen /dev/ttyACM1 115200
+ctrl+a k
 ```
 
 Send a JSON object (no trailing newline required; one complete `{ ... }` per request) and read the single-line JSON response.
