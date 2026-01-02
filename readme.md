@@ -14,7 +14,70 @@ Monitors HOMEBase power using a Waveshare RP2040-Zero and an INA226 current/volt
 - **INA226 address**: 0x40 (default)
 
 ### Build & Flash
-This firmware uses the Raspberry Pi Pico SDK. Build as a standard RP2040 project and flash the resulting UF2 in BOOTSEL mode. Any RP2040 USB CDC serial terminal can be used to interact with the device.
+This firmware uses the Raspberry Pi Pico SDK. You can either:
+- Flash the **prebuilt** `power_monitor.uf2` included in this repo, or
+- Build a **fresh** UF2 from source (recommended once you start making changes)
+
+#### Option A: Flash the prebuilt UF2 (fastest)
+1. Put the RP2040-Zero into BOOTSEL mode:
+   - Unplug the board
+   - Hold **BOOT**
+   - Plug it into USB
+   - Release **BOOT**
+2. A drive named `RPI-RP2` should appear (usually mounted under `/media/$USER/RPI-RP2`).
+3. Copy the UF2:
+```bash
+cp power_monitor.uf2 /media/$USER/RPI-RP2/
+sync
+```
+The board will reboot automatically and the `RPI-RP2` drive will disappear (expected).
+
+#### Option B: Build from source on a Raspberry Pi (no SDK preinstalled)
+The commands below mirror a clean Raspberry Pi/Debian setup.
+
+1. Install build tools and helpers (includes `screen` for serial testing):
+```bash
+sudo apt update
+sudo apt install -y \
+  git cmake build-essential \
+  gcc-arm-none-eabi libnewlib-arm-none-eabi \
+  python3 screen
+```
+
+2. Clone the Pico SDK (tag `2.2.0`) and its submodules:
+```bash
+mkdir -p ~/pico
+cd ~/pico
+git clone --branch 2.2.0 https://github.com/raspberrypi/pico-sdk.git
+cd pico-sdk
+git submodule update --init --recursive
+```
+
+3. Configure and build this project:
+```bash
+cd ~/homebase-power-monitor
+mkdir -p build
+cd build
+cmake .. -DPICO_SDK_PATH=$HOME/pico/pico-sdk -DPICO_BOARD=waveshare_rp2040_zero
+cmake --build . -j"$(nproc)"
+ls -lh power_monitor.uf2
+```
+
+4. Flash your newly built UF2 in BOOTSEL mode:
+```bash
+cp ~/homebase-power-monitor/build/power_monitor.uf2 /media/$USER/RPI-RP2/
+sync
+```
+
+#### Verify the device enumerates (USB CDC serial)
+After flashing, the device should appear as `/dev/ttyACM*`. For a stable path:
+```bash
+ls -l /dev/serial/by-id | grep power_monitor
+```
+
+#### Troubleshooting notes
+- If `RPI-RP2` doesn’t show up, try a different USB cable (many are power-only) and watch `dmesg -w` while plugging in (holding BOOT).
+- **If the INA226 is not connected / not responding on I2C**, the firmware will fail early during `ina226_init` and then stop in a tight loop. In that state it can look like “serial isn’t responding” because the main request loop never starts. Connect the INA226 (address `0x40`) to I2C0 (`SDA=GPIO0`, `SCL=GPIO1`) and power it from **3.3V** + GND.
 
 ### Connecting
 The device enumerates as a USB CDC serial port (e.g., `/dev/ttyACM0` on Linux). You can interact with it using a serial terminal. Examples below use `screen` and `jq` for readability; USB CDC ignores baud settings.
