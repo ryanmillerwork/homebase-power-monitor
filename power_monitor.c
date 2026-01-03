@@ -8,10 +8,14 @@
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 
+#ifndef FW_VERSION
+#define FW_VERSION "dev"
+#endif
+
 /*
  * USB CDC JSON protocol (single JSON object per request, no newline needed):
  * - Request must contain either:
- *     {"get":["v","a","w","pct","charging","min_v","max_v","hrs_capacity","hrs_remaining"]}
+ *     {"get":["v","a","w","pct","charging","min_v","max_v","hrs_capacity","hrs_remaining","fw"]}
  *   or
  *     {"set":{"min_v":<float>,"max_v":<float>,"hrs_capacity":<float>}}
  *   but not both in the same object.
@@ -86,6 +90,7 @@ typedef struct __attribute__((packed)) {
 static float g_min_v = 21.0f;
 static float g_max_v = 32.2f;
 static float g_hrs_capacity = 10.0f;
+static int   g_ina_ok = 0;
 
 static void settings_save(float min_v, float max_v, float hrs_capacity) {
     settings_t s = {
@@ -200,10 +205,10 @@ static int has_both_get_and_set(const char *s) {
 }
 
 // parse {"get":[ ... ]} for tokens: "v","a","w","pct","charging","min_v","max_v"
-static int parse_get_request(const char *s, int *want_v, int *want_a, int *want_w, int *want_pct, int *want_chg, int *want_min_v, int *want_max_v, int *want_hrs_cap, int *want_hrs_rem) {
+static int parse_get_request(const char *s, int *want_v, int *want_a, int *want_w, int *want_pct, int *want_chg, int *want_min_v, int *want_max_v, int *want_hrs_cap, int *want_hrs_rem, int *want_fw) {
     const char *g = strstr(s, "\"get\"");
     if (!g) return 0;
-    *want_v = *want_a = *want_w = *want_pct = *want_chg = *want_min_v = *want_max_v = *want_hrs_cap = *want_hrs_rem = 0;
+    *want_v = *want_a = *want_w = *want_pct = *want_chg = *want_min_v = *want_max_v = *want_hrs_cap = *want_hrs_rem = *want_fw = 0;
     const char *lb = strchr(g, '[');
     const char *rb = lb ? strchr(lb, ']') : NULL;
     if (!lb || !rb || rb <= lb) return 0;
@@ -217,6 +222,7 @@ static int parse_get_request(const char *s, int *want_v, int *want_a, int *want_
     if (strstr(lb, "\"max_v\"")    && strstr(lb, "\"max_v\"")    < rb) *want_max_v = 1;
     if (strstr(lb, "\"hrs_capacity\"") && strstr(lb, "\"hrs_capacity\"") < rb) *want_hrs_cap = 1;
     if (strstr(lb, "\"hrs_remaining\"") && strstr(lb, "\"hrs_remaining\"") < rb) *want_hrs_rem = 1;
+    if (strstr(lb, "\"fw\"")       && strstr(lb, "\"fw\"")       < rb) *want_fw  = 1;
     return 1;
 }
 
@@ -308,8 +314,13 @@ int main() {
     ina226_t ina;
     int rc = ina226_init(&ina, INA226_ADDR, 0.1f, 2.0f);
     if (rc) {
-        printf("{\"error\":\"ina226_init\",\"code\":%d}\n", rc);
-        while (1) tight_loop_contents();
+        // Non-fatal: keep USB CDC alive so the host can still talk to us.
+        // We'll answer requests with an explicit INA226-not-found message.
+        g_ina_ok = 0;
+        // Emit a one-time boot message for visibility (host might miss it if it connects later).
+        printf("{\"error\":\"ina226_not_found\",\"message\":\"INA226 not found\",\"code\":%d}\n", rc);
+    } else {
+        g_ina_ok = 1;
     }
 
     // Announce ready + current thresholds
@@ -345,13 +356,38 @@ int main() {
                          "{\"ok\":true,\"min_v\":%.3f,\"max_v\":%.3f,\"hrs_capacity\":%.1f}\n",
                          g_min_v, g_max_v, g_hrs_capacity);
             }
-            fputs(outbuf, stdout);
+            if (!g_ina_ok) {
+                // Always include INA226-not-found message for host-side clarity.
+                // Keep the response as JSON (even though the operation may still succeed).
+                // Trim trailing newline from outbuf and wrap with error/message prefix.
+                size_t len = strlen(outbuf);
+                if (len && outbuf[len - 1] == '\n') outbuf[len - 1] = '\0';
+                printf("{\"error\":\"ina226_not_found\",\"message\":\"INA226 not found\",\"result\":%s}\n", outbuf);
+            } else {
+                fputs(outbuf, stdout);
+            }
             continue;
         }
 
         // --- GET handler ---
-        int want_v, want_a, want_w, want_pct, want_chg, want_min_v, want_max_v, want_hrs_cap, want_hrs_rem;
-        if (parse_get_request(inbuf, &want_v, &want_a, &want_w, &want_pct, &want_chg, &want_min_v, &want_max_v, &want_hrs_cap, &want_hrs_rem)) {
+        int want_v, want_a, want_w, want_pct, want_chg, want_min_v, want_max_v, want_hrs_cap, want_hrs_rem, want_fw;
+        if (parse_get_request(inbuf, &want_v, &want_a, &want_w, &want_pct, &want_chg, &want_min_v, &want_max_v, &want_hrs_cap, &want_hrs_rem, &want_fw)) {
+            // If INA226 is missing, still answer with a JSON object including the requested
+            // non-sensor fields plus an explicit message for host-side clarity.
+            if (!g_ina_ok) {
+                char *w = outbuf; size_t rem = sizeof(outbuf); int first = 1;
+                w += snprintf(w, rem, "{"); rem = sizeof(outbuf)-(w-outbuf);
+                w += snprintf(w, rem, "\"error\":\"ina226_not_found\",\"message\":\"INA226 not found\""); first = 0; rem = sizeof(outbuf)-(w-outbuf);
+                if (want_fw) { w += snprintf(w, rem, "%s\"fw\":\"%s\"", first?"":",", FW_VERSION); first=0; rem = sizeof(outbuf)-(w-outbuf); }
+                if (want_min_v) { w += snprintf(w, rem, "%s\"min_v\":%.3f", first?"":",", g_min_v); first=0; rem = sizeof(outbuf)-(w-outbuf); }
+                if (want_max_v) { w += snprintf(w, rem, "%s\"max_v\":%.3f", first?"":",", g_max_v); first=0; rem = sizeof(outbuf)-(w-outbuf); }
+                if (want_hrs_cap) { w += snprintf(w, rem, "%s\"hrs_capacity\":%.1f", first?"":",", g_hrs_capacity); first=0; rem = sizeof(outbuf)-(w-outbuf); }
+                // Note: v/a/w/pct/charging/hrs_remaining require INA226 measurements; omit them when missing.
+                w += snprintf(w, rem, "}\n");
+                fputs(outbuf, stdout);
+                continue;
+            }
+
             float vbus=0, i=0, p=0;
             int ok = 1;
             ok &= (ina226_bus_voltage_V(&ina, &vbus) == 0);
@@ -361,6 +397,7 @@ int main() {
 
             char *w = outbuf; size_t rem = sizeof(outbuf); int first = 1;
             w += snprintf(w, rem, "{"); rem = sizeof(outbuf)-(w-outbuf);
+            if (want_fw) { w += snprintf(w, rem, "%s\"fw\":\"%s\"", first?"":",", FW_VERSION); first=0; rem = sizeof(outbuf)-(w-outbuf); }
             if (want_v)  { w += snprintf(w, rem, "%s\"v\":%.3f", first?"":",", vbus); first=0; rem = sizeof(outbuf)-(w-outbuf); }
             if (want_a)  { w += snprintf(w, rem, "%s\"a\":%.4f", first?"":",", i);    first=0; rem = sizeof(outbuf)-(w-outbuf); }
             if (want_w)  { w += snprintf(w, rem, "%s\"w\":%.4f", first?"":",", p);    first=0; rem = sizeof(outbuf)-(w-outbuf); }

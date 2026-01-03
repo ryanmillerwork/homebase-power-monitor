@@ -129,7 +129,7 @@ puts $port
 #### GET
 Request selected measurement fields by name:
 ```json
-{"get": ["v", "a", "w", "pct", "charging"]}
+{"get": ["v", "a", "w", "pct", "charging", "fw"]}
 ```
 
 Supported fields:
@@ -138,10 +138,11 @@ Supported fields:
 - **w**: Power in watts (float, 4 decimals)
 - **pct**: Estimated state-of-charge percentage (0–100, 2 decimals) computed from `min_v`/`max_v`
 - **charging**: Boolean; true when charging is detected
+- **fw**: Firmware version string (e.g. `v1.2.3` or `a1438df-dirty` depending on build configuration)
 
 Example response (fields only for those requested):
 ```json
-{"v": 28.523, "a": 0.1234, "w": 3.5123, "pct": 67.12, "charging": true}
+{"fw": "v1.2.3", "v": 28.523, "a": 0.1234, "w": 3.5123, "pct": 67.12, "charging": true}
 ```
 
 Notes:
@@ -176,6 +177,7 @@ Returned as a JSON object with an `error` code:
 - **both_get_and_set**: Request contained both `get` and `set`
 - **bad_request**: Unrecognized or malformed request
 - **i2c_read**: Sensor read failure
+- **ina226_not_found**: INA226 missing or not responding at boot (response will also include `message: "INA226 not found"`)
 
 ### Quick Examples
 - Read voltage and current:

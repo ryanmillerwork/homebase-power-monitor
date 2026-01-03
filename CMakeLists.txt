@@ -38,7 +38,30 @@ pico_sdk_init()
 add_executable(power_monitor power_monitor.c)
 
 pico_set_program_name(power_monitor "power_monitor")
-pico_set_program_version(power_monitor "0.1")
+
+# Firmware version string used both for binary metadata and the JSON API.
+# You can override at build time, e.g.:
+#   cmake .. -DFW_VERSION=1.2.3
+set(FW_VERSION "0.1" CACHE STRING "Firmware version string")
+
+# If FW_VERSION hasn't been overridden, try to derive it from git (nice for dev builds).
+if (FW_VERSION STREQUAL "0.1")
+    find_package(Git QUIET)
+    if (GIT_FOUND AND EXISTS "${CMAKE_CURRENT_LIST_DIR}/.git")
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} describe --tags --dirty --always
+            WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
+            OUTPUT_VARIABLE GIT_DESCRIBE
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if (GIT_DESCRIBE)
+            set(FW_VERSION "${GIT_DESCRIBE}" CACHE STRING "Firmware version string" FORCE)
+        endif()
+    endif()
+endif()
+
+pico_set_program_version(power_monitor "${FW_VERSION}")
 
 # Enable only stdio over USB (CDC)
 pico_enable_stdio_uart(power_monitor 0)
@@ -54,6 +77,7 @@ target_link_libraries(power_monitor
 target_compile_definitions(power_monitor PRIVATE
         USBD_MANUFACTURER="Homebase"
         USBD_PRODUCT="power_monitor"
+        FW_VERSION="${FW_VERSION}"
 )
 
 # Add the standard include files to the build
