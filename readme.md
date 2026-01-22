@@ -152,7 +152,7 @@ puts $port
 #### GET
 Request selected measurement fields by name:
 ```json
-{"get": ["v", "a", "w", "pct", "charging", "fw"]}
+{"get": ["v", "a", "w", "pct", "charging", "fw", "chg_threshold_a"]}
 ```
 
 Supported fields:
@@ -161,38 +161,41 @@ Supported fields:
 - **w**: Power in watts (float, 4 decimals)
 - **pct**: Estimated state-of-charge percentage (0–100, 2 decimals) computed from `min_v`/`max_v`
 - **charging**: Boolean; true when charging is detected
+- **chg_threshold_a**: Signed charging threshold in amps; sign encodes direction (see notes)
 - **fw**: Firmware version string (e.g. `v1.2.3` or `a1438df-dirty` depending on build configuration)
 
 Example response (fields only for those requested):
 ```json
-{"fw": "v1.2.3", "v": 28.523, "a": 0.1234, "w": 3.5123, "pct": 67.12, "charging": true}
+{"fw": "v1.2.3", "v": 28.523, "a": 0.1234, "w": 3.5123, "pct": 67.12, "charging": true, "chg_threshold_a": 0.050}
 ```
 
 Notes:
 - Percentage calculation: `pct = 100 * clamp((v - min_v) / (max_v - min_v), 0, 1)`
-- Charging heuristic: `charging = (current > 0.05A)`
+- Charging heuristic (signed threshold): `charging = (chg_threshold_a > 0 ? i >= chg_threshold_a : i <= chg_threshold_a)`
 
 #### SET
-Configure the voltage range used for percentage estimation. Values are persisted to on-chip flash.
+Configure the voltage range and charging threshold. Values are persisted to on-chip flash.
 ```json
-{"set": {"min_v": 21.0, "max_v": 32.2}}
+{"set": {"min_v": 21.0, "max_v": 32.2, "chg_threshold_a": 0.05}}
 ```
 
 Keys:
 - **min_v**: Minimum voltage (float)
 - **max_v**: Maximum voltage (float)
+- **chg_threshold_a**: Signed charging threshold in amps; positive means charging when current is greater-or-equal; negative means charging when current is less-or-equal; zero is invalid.
 
 Behavior:
 - If both `min_v` and `max_v` are provided and out of order, sane ordering is enforced internally.
 - Persisted across resets.
+- `chg_threshold_a` must be non-zero and within (-100, 100); requests outside this range are rejected with `invalid_chg_threshold`.
 
 Example response:
 ```json
-{"ok": true, "min_v": 21.000, "max_v": 32.200}
+{"ok": true, "min_v": 21.000, "max_v": 32.200, "hrs_capacity": 10.0, "chg_threshold_a": 0.050}
 ```
 
 #### Constraints & Defaults
-- Defaults if unset: `min_v = 21.0`, `max_v = 32.2`
+- Defaults if unset: `min_v = 21.0`, `max_v = 32.2`, `chg_threshold_a = 0.05`
 - `max_v` must be greater than `min_v` for valid percentage computation (ordering is enforced if needed).
 
 #### Errors
@@ -201,6 +204,7 @@ Returned as a JSON object with an `error` code:
 - **bad_request**: Unrecognized or malformed request
 - **i2c_read**: Sensor read failure
 - **ina226_not_found**: INA226 missing or not responding at boot (response will also include `message: "INA226 not found"`)
+- **invalid_chg_threshold**: `chg_threshold_a` was zero or out of the allowed range
 
 ### Quick Examples
 - Read voltage and current:
