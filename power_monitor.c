@@ -15,9 +15,9 @@
 /*
  * USB CDC JSON protocol (single JSON object per request, no newline needed):
  * - Request must contain either:
- *     {"get":["v","a","w","pct","charging","min_v","max_v","hrs_capacity","hrs_remaining","fw"]}
+ *     {"get":["v","a","w","pct","charging","min_v","max_v","hrs_capacity","hrs_remaining","fw","chg_threshold_a"]}
  *   or
- *     {"set":{"min_v":<float>,"max_v":<float>,"hrs_capacity":<float>}}
+ *     {"set":{"min_v":<float>,"max_v":<float>,"hrs_capacity":<float>,"chg_threshold_a":<float>}}
  *   but not both in the same object.
  *   You can request or set only the fields you care about; a GET list may
  *   contain any subset of the supported keys, and SET may include any of
@@ -29,8 +29,8 @@
  * - Notes:
  *     pct = 100 * clamp((v - min_v)/(max_v - min_v), 0, 1)
  *     hrs_remaining = hrs_capacity * (pct / 100), rounded to 0.1 hr
- *     charging is true when measured current > 0.05 A
- *     defaults if unset: min_v = 21.0, max_v = 32.2, hrs_capacity = 10.0
+ *     charging is true when (chg_threshold_a > 0 ? i >= chg_threshold_a : i <= chg_threshold_a)
+ *     defaults if unset: min_v = 21.0, max_v = 32.2, hrs_capacity = 10.0, chg_threshold_a = 0.05
  */
 
 // ======= I2C / INA226 wiring (Waveshare RP2040-Zero) =======
@@ -67,7 +67,17 @@ typedef struct {
 #define SETTINGS_XIP_BASE           (XIP_BASE + SETTINGS_OFFSET_FROM_START)
 
 #define SETTINGS_MAGIC   0x53544731u  // 'STG1'
-#define SETTINGS_VERSION 2
+#define SETTINGS_VERSION 3
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint32_t version;
+    float    min_v;
+    float    max_v;
+    float    hrs_capacity;
+    float    chg_threshold_a;
+    uint32_t magic_inv;   // ~magic for light corruption check
+} settings_t;
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -76,7 +86,7 @@ typedef struct __attribute__((packed)) {
     float    max_v;
     float    hrs_capacity;
     uint32_t magic_inv;   // ~magic for light corruption check
-} settings_t;
+} settings_v2_t;
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -90,15 +100,17 @@ typedef struct __attribute__((packed)) {
 static float g_min_v = 21.0f;
 static float g_max_v = 32.2f;
 static float g_hrs_capacity = 10.0f;
+static float g_chg_threshold_a = 0.05f; // signed; sign encodes direction
 static int   g_ina_ok = 0;
 
-static void settings_save(float min_v, float max_v, float hrs_capacity) {
+static void settings_save(float min_v, float max_v, float hrs_capacity, float chg_threshold_a) {
     settings_t s = {
         .magic = SETTINGS_MAGIC,
         .version = SETTINGS_VERSION,
         .min_v = min_v,
         .max_v = max_v,
         .hrs_capacity = hrs_capacity,
+        .chg_threshold_a = chg_threshold_a,
         .magic_inv = ~SETTINGS_MAGIC,
     };
     uint32_t ints = save_and_disable_interrupts();
@@ -113,11 +125,26 @@ static void settings_load_or_default(void) {
         if (s->version == SETTINGS_VERSION &&
             s->max_v > s->min_v &&
             s->max_v < 1000.0f && s->min_v > -100.0f &&
-            s->hrs_capacity > 0.0f && s->hrs_capacity < 10000.0f) {
+            s->hrs_capacity > 0.0f && s->hrs_capacity < 10000.0f &&
+            s->chg_threshold_a != 0.0f &&
+            s->chg_threshold_a > -100.0f && s->chg_threshold_a < 100.0f) {
             g_min_v = s->min_v;
             g_max_v = s->max_v;
             g_hrs_capacity = s->hrs_capacity;
+            g_chg_threshold_a = s->chg_threshold_a;
             return;
+        }
+        if (s->version == 2) {
+            const settings_v2_t *v2 = (const settings_v2_t *)SETTINGS_XIP_BASE;
+            if (v2->max_v > v2->min_v &&
+                v2->max_v < 1000.0f && v2->min_v > -100.0f &&
+                v2->hrs_capacity > 0.0f && v2->hrs_capacity < 10000.0f) {
+                g_min_v = v2->min_v;
+                g_max_v = v2->max_v;
+                g_hrs_capacity = v2->hrs_capacity;
+                g_chg_threshold_a = 0.05f; // default for legacy settings
+                return;
+            }
         }
         if (s->version == 1) {
             const settings_v1_t *v1 = (const settings_v1_t *)SETTINGS_XIP_BASE;
@@ -126,11 +153,12 @@ static void settings_load_or_default(void) {
                 g_min_v = v1->min_v;
                 g_max_v = v1->max_v;
                 g_hrs_capacity = 10.0f;
+                g_chg_threshold_a = 0.05f;
             }
         }
     }
     // initialize sector with defaults so future loads are fast
-    settings_save(g_min_v, g_max_v, g_hrs_capacity);
+    settings_save(g_min_v, g_max_v, g_hrs_capacity, g_chg_threshold_a);
 }
 
 // ======= I2C low-level helpers =======
@@ -204,11 +232,11 @@ static int has_both_get_and_set(const char *s) {
     return strstr(s, "\"get\"") && strstr(s, "\"set\"");
 }
 
-// parse {"get":[ ... ]} for tokens: "v","a","w","pct","charging","min_v","max_v"
-static int parse_get_request(const char *s, int *want_v, int *want_a, int *want_w, int *want_pct, int *want_chg, int *want_min_v, int *want_max_v, int *want_hrs_cap, int *want_hrs_rem, int *want_fw) {
+// parse {"get":[ ... ]} for tokens: "v","a","w","pct","charging","min_v","max_v","chg_threshold_a"
+static int parse_get_request(const char *s, int *want_v, int *want_a, int *want_w, int *want_pct, int *want_chg, int *want_min_v, int *want_max_v, int *want_hrs_cap, int *want_hrs_rem, int *want_fw, int *want_chg_thr) {
     const char *g = strstr(s, "\"get\"");
     if (!g) return 0;
-    *want_v = *want_a = *want_w = *want_pct = *want_chg = *want_min_v = *want_max_v = *want_hrs_cap = *want_hrs_rem = *want_fw = 0;
+    *want_v = *want_a = *want_w = *want_pct = *want_chg = *want_min_v = *want_max_v = *want_hrs_cap = *want_hrs_rem = *want_fw = *want_chg_thr = 0;
     const char *lb = strchr(g, '[');
     const char *rb = lb ? strchr(lb, ']') : NULL;
     if (!lb || !rb || rb <= lb) return 0;
@@ -223,14 +251,16 @@ static int parse_get_request(const char *s, int *want_v, int *want_a, int *want_
     if (strstr(lb, "\"hrs_capacity\"") && strstr(lb, "\"hrs_capacity\"") < rb) *want_hrs_cap = 1;
     if (strstr(lb, "\"hrs_remaining\"") && strstr(lb, "\"hrs_remaining\"") < rb) *want_hrs_rem = 1;
     if (strstr(lb, "\"fw\"")       && strstr(lb, "\"fw\"")       < rb) *want_fw  = 1;
+    if (strstr(lb, "\"chg_threshold_a\"") && strstr(lb, "\"chg_threshold_a\"") < rb) *want_chg_thr = 1;
     return 1;
 }
 
-// parse {"set":{"max_v":..,"min_v":..}}
-static int parse_set_request(const char *s, float *max_v, float *min_v, float *hrs_capacity, int *changed) {
+// parse {"set":{"max_v":..,"min_v":..,"chg_threshold_a":..}}
+static int parse_set_request(const char *s, float *max_v, float *min_v, float *hrs_capacity, float *chg_threshold_a, int *changed, int *saw_chg_thr) {
     const char *st = strstr(s, "\"set\"");
     if (!st) return 0;
     *changed = 0;
+    *saw_chg_thr = 0;
     const char *lb = strchr(st, '{');
     const char *rb = lb ? strchr(lb, '}') : NULL;
     if (!lb || !rb || rb <= lb) return 0;
@@ -249,6 +279,11 @@ static int parse_set_request(const char *s, float *max_v, float *min_v, float *h
     if (hc && hc < rb) {
         float v;
         if (sscanf(hc, "\"hrs_capacity\"%*[^0-9.-]%f", &v) == 1) { *hrs_capacity = v; *changed = 1; }
+    }
+    const char *ct = strstr(lb, "\"chg_threshold_a\"");
+    if (ct && ct < rb) {
+        float v;
+        if (sscanf(ct, "\"chg_threshold_a\"%*[^0-9.-]%f", &v) == 1) { *chg_threshold_a = v; *changed = 1; *saw_chg_thr = 1; }
     }
     return 1;
 }
@@ -337,9 +372,16 @@ int main() {
 
         // --- SET handler ---
         int changed = 0;
-        float new_max = g_max_v, new_min = g_min_v, new_hrs_cap = g_hrs_capacity;
-        if (parse_set_request(inbuf, &new_max, &new_min, &new_hrs_cap, &changed)) {
+        int saw_chg_thr = 0;
+        float new_max = g_max_v, new_min = g_min_v, new_hrs_cap = g_hrs_capacity, new_chg_thr = g_chg_threshold_a;
+        if (parse_set_request(inbuf, &new_max, &new_min, &new_hrs_cap, &new_chg_thr, &changed, &saw_chg_thr)) {
             if (changed) {
+                if (saw_chg_thr) {
+                    if (new_chg_thr == 0.0f || new_chg_thr <= -100.0f || new_chg_thr >= 100.0f) {
+                        printf("{\"error\":\"invalid_chg_threshold\",\"message\":\"chg_threshold_a must be non-zero between -100 and 100\"}\n");
+                        continue;
+                    }
+                }
                 // ensure sane ordering
                 if (new_max <= new_min) { float t = new_max; new_max = new_min; new_min = t; }
                 if (new_hrs_cap < 0.0f) new_hrs_cap = 0.0f;
@@ -347,14 +389,15 @@ int main() {
                 g_max_v = new_max;
                 g_min_v = new_min;
                 g_hrs_capacity = new_hrs_cap;
-                settings_save(g_min_v, g_max_v, g_hrs_capacity);
+                g_chg_threshold_a = new_chg_thr;
+                settings_save(g_min_v, g_max_v, g_hrs_capacity, g_chg_threshold_a);
                 snprintf(outbuf, sizeof(outbuf),
-                         "{\"ok\":true,\"min_v\":%.3f,\"max_v\":%.3f,\"hrs_capacity\":%.1f}\n",
-                         g_min_v, g_max_v, g_hrs_capacity);
+                         "{\"ok\":true,\"min_v\":%.3f,\"max_v\":%.3f,\"hrs_capacity\":%.1f,\"chg_threshold_a\":%.3f}\n",
+                         g_min_v, g_max_v, g_hrs_capacity, g_chg_threshold_a);
             } else {
                 snprintf(outbuf, sizeof(outbuf),
-                         "{\"ok\":true,\"min_v\":%.3f,\"max_v\":%.3f,\"hrs_capacity\":%.1f}\n",
-                         g_min_v, g_max_v, g_hrs_capacity);
+                         "{\"ok\":true,\"min_v\":%.3f,\"max_v\":%.3f,\"hrs_capacity\":%.1f,\"chg_threshold_a\":%.3f}\n",
+                         g_min_v, g_max_v, g_hrs_capacity, g_chg_threshold_a);
             }
             if (!g_ina_ok) {
                 // Always include INA226-not-found message for host-side clarity.
@@ -370,8 +413,8 @@ int main() {
         }
 
         // --- GET handler ---
-        int want_v, want_a, want_w, want_pct, want_chg, want_min_v, want_max_v, want_hrs_cap, want_hrs_rem, want_fw;
-        if (parse_get_request(inbuf, &want_v, &want_a, &want_w, &want_pct, &want_chg, &want_min_v, &want_max_v, &want_hrs_cap, &want_hrs_rem, &want_fw)) {
+        int want_v, want_a, want_w, want_pct, want_chg, want_min_v, want_max_v, want_hrs_cap, want_hrs_rem, want_fw, want_chg_thr;
+        if (parse_get_request(inbuf, &want_v, &want_a, &want_w, &want_pct, &want_chg, &want_min_v, &want_max_v, &want_hrs_cap, &want_hrs_rem, &want_fw, &want_chg_thr)) {
             // If INA226 is missing, still answer with a JSON object including the requested
             // non-sensor fields plus an explicit message for host-side clarity.
             if (!g_ina_ok) {
@@ -382,6 +425,7 @@ int main() {
                 if (want_min_v) { w += snprintf(w, rem, "%s\"min_v\":%.3f", first?"":",", g_min_v); first=0; rem = sizeof(outbuf)-(w-outbuf); }
                 if (want_max_v) { w += snprintf(w, rem, "%s\"max_v\":%.3f", first?"":",", g_max_v); first=0; rem = sizeof(outbuf)-(w-outbuf); }
                 if (want_hrs_cap) { w += snprintf(w, rem, "%s\"hrs_capacity\":%.1f", first?"":",", g_hrs_capacity); first=0; rem = sizeof(outbuf)-(w-outbuf); }
+                if (want_chg_thr) { w += snprintf(w, rem, "%s\"chg_threshold_a\":%.3f", first?"":",", g_chg_threshold_a); first=0; rem = sizeof(outbuf)-(w-outbuf); }
                 // Note: v/a/w/pct/charging/hrs_remaining require INA226 measurements; omit them when missing.
                 w += snprintf(w, rem, "}\n");
                 fputs(outbuf, stdout);
@@ -413,13 +457,14 @@ int main() {
                 w += snprintf(w, rem, "%s\"hrs_remaining\":%.1f", first?"":",", hrs_remaining); first=0; rem = sizeof(outbuf)-(w-outbuf);
             }
             if (want_chg){
-                int charging = (i > 0.05f) ? 1 : 0; // tweak threshold as needed
+                int charging = (g_chg_threshold_a > 0.0f) ? (i >= g_chg_threshold_a) : (i <= g_chg_threshold_a);
                 w += snprintf(w, rem, "%s\"charging\":%s", first?"":",", charging?"true":"false");
                 first=0; rem = sizeof(outbuf)-(w-outbuf);
             }
             if (want_min_v) { w += snprintf(w, rem, "%s\"min_v\":%.3f", first?"":",", g_min_v); first=0; rem = sizeof(outbuf)-(w-outbuf); }
             if (want_max_v) { w += snprintf(w, rem, "%s\"max_v\":%.3f", first?"":",", g_max_v); first=0; rem = sizeof(outbuf)-(w-outbuf); }
             if (want_hrs_cap) { w += snprintf(w, rem, "%s\"hrs_capacity\":%.1f", first?"":",", g_hrs_capacity); first=0; rem = sizeof(outbuf)-(w-outbuf); }
+            if (want_chg_thr) { w += snprintf(w, rem, "%s\"chg_threshold_a\":%.3f", first?"":",", g_chg_threshold_a); first=0; rem = sizeof(outbuf)-(w-outbuf); }
             w += snprintf(w, rem, "}\n");
             fputs(outbuf, stdout);
             continue;

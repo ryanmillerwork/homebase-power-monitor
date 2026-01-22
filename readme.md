@@ -13,6 +13,29 @@ Monitors HOMEBase power using a Waveshare RP2040-Zero and an INA226 current/volt
 - **I2C speed**: 100 kHz (can be increased to 400 kHz)
 - **INA226 address**: 0x40 (default)
 
+#### INA226 connections (what goes where)
+- **Power / I2C (RP2040 ↔ INA226)**
+  - **GND** → GND
+  - **3.3V** → **VS/VCC** (sensor supply)
+  - **GPIO0 (SDA)** → SDA
+  - **GPIO1 (SCL)** → SCL
+
+- **Sense wiring (shunt + bus voltage)**
+  - Place the shunt resistor in series with the **positive** rail (high-side sensing):
+
+    `SUPPLY+ → VIN+ → [ Rshunt ] → VIN- → LOAD+`
+
+  - Connect **VBUS** (sometimes labeled **VBS** on breakouts) to the **bus voltage you want reported**. Most commonly you want *load voltage*, so tie it to the **load-side** node (same as **VIN- / LOAD+**):
+
+    `VBUS/VBS → VIN- (LOAD+)`
+
+  - Connect **LOAD-** to **SUPPLY-**, and ensure the INA226 **GND** and RP2040 **GND** share the same ground reference.
+
+- **Notes / gotchas**
+  - **I2C pull-ups**: many INA226 breakouts include SDA/SCL pull-ups to VCC; if yours doesn’t, add ~4.7k–10k pull-ups to **3.3V**.
+  - **Address**: if you change `A0/A1` straps on the breakout, update the firmware address from the default `0x40`.
+  - **Voltage range**: INA226 measures bus voltage up to ~36V relative to GND (check your board/datasheet for limits).
+
 ### Build & Flash
 This firmware uses the Raspberry Pi Pico SDK. You can either:
 - Flash the **prebuilt** `power_monitor.uf2` included in this repo, or
