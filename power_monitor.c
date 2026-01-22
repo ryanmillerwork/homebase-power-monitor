@@ -16,6 +16,8 @@
  * USB CDC JSON protocol (single JSON object per request, no newline needed):
  * - Request must contain either:
  *     {"get":["v","a","w","pct","charging","min_v","max_v","hrs_capacity","hrs_remaining","fw","chg_threshold_a"]}
+ *     or
+ *     {"get":"all"} (equivalent to requesting every supported field)
  *   or
  *     {"set":{"min_v":<float>,"max_v":<float>,"hrs_capacity":<float>,"chg_threshold_a":<float>}}
  *   but not both in the same object.
@@ -25,7 +27,7 @@
  * - Example responses:
  *     {"v":28.523,"a":0.1234,"w":3.5123,"pct":67.12,"charging":true,"hrs_remaining":5.0}
  *     {"ok":true,"min_v":21.000,"max_v":32.200,"hrs_capacity":10.0}
- * - Errors: {"error":"both_get_and_set"} | {"error":"bad_request"} | {"error":"i2c_read"}
+ * - Errors: {"error":"both_get_and_set"} | {"error":"bad_request"} | {"error":"i2c_read"} | {"error":"invalid_get_field","field":<str>,"supported":[...]}
  * - Notes:
  *     pct = 100 * clamp((v - min_v)/(max_v - min_v), 0, 1)
  *     hrs_remaining = hrs_capacity * (pct / 100), rounded to 0.1 hr
@@ -102,6 +104,14 @@ static float g_max_v = 32.2f;
 static float g_hrs_capacity = 10.0f;
 static float g_chg_threshold_a = 0.05f; // signed; sign encodes direction
 static int   g_ina_ok = 0;
+
+// Supported GET fields (also used for validation and the "all" shortcut)
+static const char *k_get_fields[] = {
+    "v", "a", "w", "pct", "charging",
+    "min_v", "max_v", "hrs_capacity", "hrs_remaining",
+    "fw", "chg_threshold_a"
+};
+static const size_t k_get_fields_count = sizeof(k_get_fields) / sizeof(k_get_fields[0]);
 
 static void settings_save(float min_v, float max_v, float hrs_capacity, float chg_threshold_a) {
     settings_t s = {
@@ -232,26 +242,80 @@ static int has_both_get_and_set(const char *s) {
     return strstr(s, "\"get\"") && strstr(s, "\"set\"");
 }
 
-// parse {"get":[ ... ]} for tokens: "v","a","w","pct","charging","min_v","max_v","chg_threshold_a"
-static int parse_get_request(const char *s, int *want_v, int *want_a, int *want_w, int *want_pct, int *want_chg, int *want_min_v, int *want_max_v, int *want_hrs_cap, int *want_hrs_rem, int *want_fw, int *want_chg_thr) {
+// set all GET wants to 1
+static void set_all_wants(int *want_v, int *want_a, int *want_w, int *want_pct, int *want_chg, int *want_min_v, int *want_max_v, int *want_hrs_cap, int *want_hrs_rem, int *want_fw, int *want_chg_thr) {
+    *want_v = *want_a = *want_w = *want_pct = *want_chg = *want_min_v = *want_max_v = *want_hrs_cap = *want_hrs_rem = *want_fw = *want_chg_thr = 1;
+}
+
+// parse {"get":[ ... ]} or {"get":"all"}; validates against supported list
+// returns 1 on success, -1 on invalid field, 0 if no get found
+static int parse_get_request(const char *s, int *want_v, int *want_a, int *want_w, int *want_pct, int *want_chg, int *want_min_v, int *want_max_v, int *want_hrs_cap, int *want_hrs_rem, int *want_fw, int *want_chg_thr, char *bad_field, size_t bad_field_cap) {
     const char *g = strstr(s, "\"get\"");
     if (!g) return 0;
     *want_v = *want_a = *want_w = *want_pct = *want_chg = *want_min_v = *want_max_v = *want_hrs_cap = *want_hrs_rem = *want_fw = *want_chg_thr = 0;
+
+    // support both {"get":"all"} and {"get":["..."]}
     const char *lb = strchr(g, '[');
     const char *rb = lb ? strchr(lb, ']') : NULL;
+    const char *q = strchr(g, '"'); // first quote after "get"
+    const char *after_get = q ? q + 1 : g;
+
+    // Shortcut: {"get":"all"}
+    const char *colon = strchr(after_get, ':');
+    if (colon) {
+        const char *quote_val = strchr(colon, '"');
+        if (quote_val) {
+            const char *quote_val_end = strchr(quote_val + 1, '"');
+            if (quote_val_end && (lb == NULL || quote_val < lb)) {
+                size_t len = (size_t)(quote_val_end - (quote_val + 1));
+                if (len == 3 && strncmp(quote_val + 1, "all", 3) == 0) {
+                    set_all_wants(want_v, want_a, want_w, want_pct, want_chg, want_min_v, want_max_v, want_hrs_cap, want_hrs_rem, want_fw, want_chg_thr);
+                    return 1;
+                }
+            }
+        }
+    }
+
     if (!lb || !rb || rb <= lb) return 0;
 
-    if (strstr(lb, "\"v\"")        && strstr(lb, "\"v\"")        < rb) *want_v   = 1;
-    if (strstr(lb, "\"a\"")        && strstr(lb, "\"a\"")        < rb) *want_a   = 1;
-    if (strstr(lb, "\"w\"")        && strstr(lb, "\"w\"")        < rb) *want_w   = 1;
-    if (strstr(lb, "\"pct\"")      && strstr(lb, "\"pct\"")      < rb) *want_pct = 1;
-    if (strstr(lb, "\"charging\"") && strstr(lb, "\"charging\"") < rb) *want_chg = 1;
-    if (strstr(lb, "\"min_v\"")    && strstr(lb, "\"min_v\"")    < rb) *want_min_v = 1;
-    if (strstr(lb, "\"max_v\"")    && strstr(lb, "\"max_v\"")    < rb) *want_max_v = 1;
-    if (strstr(lb, "\"hrs_capacity\"") && strstr(lb, "\"hrs_capacity\"") < rb) *want_hrs_cap = 1;
-    if (strstr(lb, "\"hrs_remaining\"") && strstr(lb, "\"hrs_remaining\"") < rb) *want_hrs_rem = 1;
-    if (strstr(lb, "\"fw\"")       && strstr(lb, "\"fw\"")       < rb) *want_fw  = 1;
-    if (strstr(lb, "\"chg_threshold_a\"") && strstr(lb, "\"chg_threshold_a\"") < rb) *want_chg_thr = 1;
+    const char *p = lb;
+    while (p && p < rb) {
+        const char *q1 = strchr(p, '"');
+        if (!q1 || q1 >= rb) break;
+        const char *q2 = strchr(q1 + 1, '"');
+        if (!q2 || q2 > rb) break;
+        size_t len = (size_t)(q2 - (q1 + 1));
+        if (len == 0) { p = q2 + 1; continue; }
+
+        // copy token
+        size_t copy_len = len < bad_field_cap - 1 ? len : bad_field_cap - 1;
+        memcpy(bad_field, q1 + 1, copy_len);
+        bad_field[copy_len] = '\0';
+
+        int matched = 0;
+        if (len == 3 && strncmp(q1 + 1, "all", 3) == 0) {
+            set_all_wants(want_v, want_a, want_w, want_pct, want_chg, want_min_v, want_max_v, want_hrs_cap, want_hrs_rem, want_fw, want_chg_thr);
+            matched = 1;
+        } else {
+            if (len == 1 && bad_field[0] == 'v') { *want_v = 1; matched = 1; }
+            else if (len == 1 && bad_field[0] == 'a') { *want_a = 1; matched = 1; }
+            else if (len == 1 && bad_field[0] == 'w') { *want_w = 1; matched = 1; }
+            else if (len == 3 && strncmp(bad_field, "pct", 3) == 0) { *want_pct = 1; matched = 1; }
+            else if (len == 8 && strncmp(bad_field, "charging", 8) == 0) { *want_chg = 1; matched = 1; }
+            else if (len == 5 && strncmp(bad_field, "min_v", 5) == 0) { *want_min_v = 1; matched = 1; }
+            else if (len == 5 && strncmp(bad_field, "max_v", 5) == 0) { *want_max_v = 1; matched = 1; }
+            else if (len == 12 && strncmp(bad_field, "hrs_capacity", 12) == 0) { *want_hrs_cap = 1; matched = 1; }
+            else if (len == 13 && strncmp(bad_field, "hrs_remaining", 13) == 0) { *want_hrs_rem = 1; matched = 1; }
+            else if (len == 2 && strncmp(bad_field, "fw", 2) == 0) { *want_fw = 1; matched = 1; }
+            else if (len == 15 && strncmp(bad_field, "chg_threshold_a", 15) == 0) { *want_chg_thr = 1; matched = 1; }
+        }
+
+        if (!matched) {
+            return -1; // invalid field captured in bad_field
+        }
+        p = q2 + 1;
+    }
+
     return 1;
 }
 
@@ -414,7 +478,14 @@ int main() {
 
         // --- GET handler ---
         int want_v, want_a, want_w, want_pct, want_chg, want_min_v, want_max_v, want_hrs_cap, want_hrs_rem, want_fw, want_chg_thr;
-        if (parse_get_request(inbuf, &want_v, &want_a, &want_w, &want_pct, &want_chg, &want_min_v, &want_max_v, &want_hrs_cap, &want_hrs_rem, &want_fw, &want_chg_thr)) {
+        char bad_field[32] = {0};
+        int get_rc = parse_get_request(inbuf, &want_v, &want_a, &want_w, &want_pct, &want_chg, &want_min_v, &want_max_v, &want_hrs_cap, &want_hrs_rem, &want_fw, &want_chg_thr, bad_field, sizeof(bad_field));
+        if (get_rc == -1) {
+            // Invalid field requested; respond with explicit list of supported fields.
+            printf("{\"error\":\"invalid_get_field\",\"field\":\"%s\",\"supported\":[\"v\",\"a\",\"w\",\"pct\",\"charging\",\"min_v\",\"max_v\",\"hrs_capacity\",\"hrs_remaining\",\"fw\",\"chg_threshold_a\"]}\n", bad_field);
+            continue;
+        }
+        if (get_rc == 1) {
             // If INA226 is missing, still answer with a JSON object including the requested
             // non-sensor fields plus an explicit message for host-side clarity.
             if (!g_ina_ok) {

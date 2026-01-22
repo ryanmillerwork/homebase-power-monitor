@@ -150,7 +150,7 @@ puts $port
 - Errors are reported as `{"error":"<code>"}`.
 
 #### GET
-Request selected measurement fields by name:
+Request selected measurement fields by name (or `"all"` for everything):
 ```json
 {"get": ["v", "a", "w", "pct", "charging", "fw", "chg_threshold_a"]}
 ```
@@ -165,6 +165,10 @@ Supported fields:
 - **hrs_remaining**: Estimated hours remaining (`hrs_capacity * pct/100`, 0.1 hr resolution)
 - **chg_threshold_a**: Signed charging threshold in amps; sign encodes direction (see notes)
 - **fw**: Firmware version string (e.g. `v1.2.3` or `a1438df-dirty` depending on build configuration)
+- **min_v**, **max_v**: Configured voltage bounds used for pct calculation
+
+Shortcut:
+- `{"get":"all"}` (or include `"all"` in the list) returns every supported field above.
 
 Example response (fields only for those requested):
 ```json
@@ -209,6 +213,7 @@ Returned as a JSON object with an `error` code:
 - **i2c_read**: Sensor read failure
 - **ina226_not_found**: INA226 missing or not responding at boot (response will also include `message: "INA226 not found"`)
 - **invalid_chg_threshold**: `chg_threshold_a` was zero or out of the allowed range
+- **invalid_get_field**: Request contained an unsupported field; the response includes the offending field and the full supported list
 
 ### Quick Examples
 - Read voltage and current:
