@@ -161,27 +161,31 @@ Supported fields:
 - **w**: Power in watts (float, 4 decimals)
 - **pct**: Estimated state-of-charge percentage (0–100, 2 decimals) computed from `min_v`/`max_v`
 - **charging**: Boolean; true when charging is detected
+- **hrs_capacity**: Persisted capacity proxy (hours at 100%); returned when requested
+- **hrs_remaining**: Estimated hours remaining (`hrs_capacity * pct/100`, 0.1 hr resolution)
 - **chg_threshold_a**: Signed charging threshold in amps; sign encodes direction (see notes)
 - **fw**: Firmware version string (e.g. `v1.2.3` or `a1438df-dirty` depending on build configuration)
 
 Example response (fields only for those requested):
 ```json
-{"fw": "v1.2.3", "v": 28.523, "a": 0.1234, "w": 3.5123, "pct": 67.12, "charging": true, "chg_threshold_a": 0.050}
+{"fw": "v1.2.3", "v": 28.523, "a": 0.1234, "w": 3.5123, "pct": 67.12, "charging": true, "hrs_remaining": 6.7, "chg_threshold_a": 0.050}
 ```
 
 Notes:
 - Percentage calculation: `pct = 100 * clamp((v - min_v) / (max_v - min_v), 0, 1)`
 - Charging heuristic (signed threshold): `charging = (chg_threshold_a > 0 ? i >= chg_threshold_a : i <= chg_threshold_a)`
+- Hours remaining: `hrs_remaining = hrs_capacity * (pct / 100)`
 
 #### SET
 Configure the voltage range and charging threshold. Values are persisted to on-chip flash.
 ```json
-{"set": {"min_v": 21.0, "max_v": 32.2, "chg_threshold_a": 0.05}}
+{"set": {"min_v": 21.0, "max_v": 32.2, "hrs_capacity": 10.0, "chg_threshold_a": 0.05}}
 ```
 
 Keys:
 - **min_v**: Minimum voltage (float)
 - **max_v**: Maximum voltage (float)
+- **hrs_capacity**: Capacity proxy in hours at 100% (float; used only to scale hrs_remaining)
 - **chg_threshold_a**: Signed charging threshold in amps; positive means charging when current is greater-or-equal; negative means charging when current is less-or-equal; zero is invalid.
 
 Behavior:
@@ -195,7 +199,7 @@ Example response:
 ```
 
 #### Constraints & Defaults
-- Defaults if unset: `min_v = 21.0`, `max_v = 32.2`, `chg_threshold_a = 0.05`
+- Defaults if unset: `min_v = 21.0`, `max_v = 32.2`, `hrs_capacity = 10.0`, `chg_threshold_a = 0.05`
 - `max_v` must be greater than `min_v` for valid percentage computation (ordering is enforced if needed).
 
 #### Errors
@@ -212,9 +216,9 @@ Returned as a JSON object with an `error` code:
 {"get": ["v", "a"]}
 ```
 
-- Read everything:
+- Read everything (all supported GET fields):
 ```json
-{"get": ["v", "a", "w", "pct", "charging"]}
+{"get": ["v", "a", "w", "pct", "charging", "min_v", "max_v", "hrs_capacity", "hrs_remaining", "fw", "chg_threshold_a"]}
 ```
 
 - Set thresholds then verify:
