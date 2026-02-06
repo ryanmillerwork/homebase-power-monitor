@@ -237,6 +237,21 @@ static int ina226_power_W(ina226_t *dev, float *p) {
 // ======= Utils =======
 static float clampf(float x, float lo, float hi){ return x < lo ? lo : (x > hi ? hi : x); }
 
+static float pct_from_voltage_alt(float vbus, float min_v, float max_v) {
+    const float knee_v = 24.0f;
+    const float tail_fraction = 0.1f;
+
+    if (max_v <= min_v || knee_v <= min_v || max_v <= knee_v) {
+        return clampf((vbus - min_v) / (max_v - min_v), 0.0f, 1.0f);
+    }
+    if (vbus >= knee_v) {
+        float head = (vbus - knee_v) / (max_v - knee_v);
+        return clampf(tail_fraction + (1.0f - tail_fraction) * head, 0.0f, 1.0f);
+    }
+    float tail = (vbus - min_v) / (knee_v - min_v);
+    return clampf(tail_fraction * clampf(tail, 0.0f, 1.0f), 0.0f, 1.0f);
+}
+
 // detect both "get" and "set" present
 static int has_both_get_and_set(const char *s) {
     return strstr(s, "\"get\"") && strstr(s, "\"set\"");
@@ -518,7 +533,7 @@ int main() {
             if (want_w)  { w += snprintf(w, rem, "%s\"w\":%.4f", first?"":",", p);    first=0; rem = sizeof(outbuf)-(w-outbuf); }
             float pct = 0.0f;
             if (want_pct || want_hrs_rem){
-                pct = 100.0f * clampf((vbus - g_min_v) / (g_max_v - g_min_v), 0.0f, 1.0f);
+                pct = 100.0f * pct_from_voltage_alt(vbus, g_min_v, g_max_v);
             }
             if (want_pct){
                 w += snprintf(w, rem, "%s\"pct\":%.2f", first?"":",", pct); first=0; rem = sizeof(outbuf)-(w-outbuf);
