@@ -98,9 +98,40 @@ After flashing, the device should appear as `/dev/ttyACM*`. For a stable path:
 ls -l /dev/serial/by-id | grep power_monitor
 ```
 
+#### Flash and unit test (picotool)
+For automated flash + verification on a bench Pi, use [`flash_and_test.py`](flash_and_test.py). It loads the UF2 via `picotool`, then exercises the USB serial JSON protocol and reports tiered results (flash/comm vs sensor).
+
+Dependencies:
+```bash
+sudo apt install picotool python3-serial
+```
+
+Examples:
+```bash
+# Flash + test (uses power_monitor.uf2 in repo root, or build/power_monitor.uf2)
+./flash_and_test.py
+
+# Build first, then flash + test
+./flash_and_test.py --build
+
+# Test only (device already flashed), target a specific unit
+./flash_and_test.py --skip-flash --serial 50443405A88A991C
+
+# Verbose serial traffic
+./flash_and_test.py --skip-flash --verbose
+```
+
+Exit codes:
+- `0` — all tests pass, including INA226 sensor readings
+- `1` — flash or verify failed
+- `2` — serial communication or protocol tests failed
+- `3` — firmware OK but sensor failed (e.g. `ina226_not_found` on a unit with a bad INA226)
+
+If `picotool` reports permission errors, run with `sudo` or add your user to the `dialout` group.
+
 #### Troubleshooting notes
 - If `RPI-RP2` doesn’t show up, try a different USB cable (many are power-only) and watch `dmesg -w` while plugging in (holding BOOT).
-- **If the INA226 is not connected / not responding on I2C**, the firmware will fail early during `ina226_init` and then stop in a tight loop. In that state it can look like “serial isn’t responding” because the main request loop never starts. Connect the INA226 (address `0x40`) to I2C0 (`SDA=GPIO0`, `SCL=GPIO1`) and power it from **3.3V** + GND.
+- **If the INA226 is not connected / not responding on I2C**, current firmware stays responsive on USB serial and returns `ina226_not_found`. Older firmware (pre-`ec0fb7d`) printed `ina226_init` once and then stopped responding. Use `./flash_and_test.py` to flash current firmware and verify comm vs sensor separately. Connect the INA226 (address `0x40`) to I2C0 (`SDA=GPIO0`, `SCL=GPIO1`) and power it from **3.3V** + GND.
 
 ### Connecting
 The device enumerates as a USB CDC serial port (e.g., `/dev/ttyACM0` on Linux). You can interact with it using a serial terminal. Examples below use `screen` and `jq` for readability; USB CDC ignores baud settings.
@@ -172,7 +203,7 @@ Shortcut:
 
 Example response (fields only for those requested):
 ```json
-{"fw": "v1.2.3", "v": 28.523, "a": 0.1234, "w": 3.5123, "pct": 67.12, "charging": true, "hrs_remaining": 6.7, "chg_threshold_a": 0.050}
+{"fw": "v1.2.3", "v": 28.523, "a": -0.1234, "w": 3.5123, "pct": 67.12, "charging": true, "hrs_remaining": 6.7, "chg_threshold_a": -0.050}
 ```
 
 Notes:
@@ -183,7 +214,7 @@ Notes:
 #### SET
 Configure the voltage range and charging threshold. Values are persisted to on-chip flash.
 ```json
-{"set": {"min_v": 21.0, "max_v": 32.2, "hrs_capacity": 10.0, "chg_threshold_a": 0.05}}
+{"set": {"min_v": 21.0, "max_v": 32.2, "hrs_capacity": 10.0, "chg_threshold_a": -0.05}}
 ```
 
 Keys:
@@ -199,11 +230,11 @@ Behavior:
 
 Example response:
 ```json
-{"ok": true, "min_v": 21.000, "max_v": 32.200, "hrs_capacity": 10.0, "chg_threshold_a": 0.050}
+{"ok": true, "min_v": 21.000, "max_v": 32.200, "hrs_capacity": 10.0, "chg_threshold_a": -0.050}
 ```
 
 #### Constraints & Defaults
-- Defaults if unset: `min_v = 21.0`, `max_v = 32.2`, `hrs_capacity = 10.0`, `chg_threshold_a = 0.05`
+- Defaults if unset: `min_v = 21.0`, `max_v = 32.2`, `hrs_capacity = 10.0`, `chg_threshold_a = -0.05`
 - `max_v` must be greater than `min_v` for valid percentage computation (ordering is enforced if needed).
 
 #### Errors

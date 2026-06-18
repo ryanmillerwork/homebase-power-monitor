@@ -32,7 +32,7 @@
  *     pct = 100 * clamp((v - min_v)/(max_v - min_v), 0, 1)
  *     hrs_remaining = hrs_capacity * (pct / 100), rounded to 0.1 hr
  *     charging is true when (chg_threshold_a > 0 ? i >= chg_threshold_a : i <= chg_threshold_a)
- *     defaults if unset: min_v = 21.0, max_v = 32.2, hrs_capacity = 10.0, chg_threshold_a = 0.05
+ *     defaults if unset: min_v = 21.0, max_v = 32.2, hrs_capacity = 10.0, chg_threshold_a = -0.05
  */
 
 // ======= I2C / INA226 wiring (Waveshare RP2040-Zero) =======
@@ -102,7 +102,7 @@ typedef struct __attribute__((packed)) {
 static float g_min_v = 21.0f;
 static float g_max_v = 32.2f;
 static float g_hrs_capacity = 10.0f;
-static float g_chg_threshold_a = 0.05f; // signed; sign encodes direction
+static float g_chg_threshold_a = -0.05f; // signed; sign encodes direction
 static int   g_ina_ok = 0;
 
 // Supported GET fields (also used for validation and the "all" shortcut)
@@ -152,7 +152,7 @@ static void settings_load_or_default(void) {
                 g_min_v = v2->min_v;
                 g_max_v = v2->max_v;
                 g_hrs_capacity = v2->hrs_capacity;
-                g_chg_threshold_a = 0.05f; // default for legacy settings
+                g_chg_threshold_a = -0.05f; // default for legacy settings
                 return;
             }
         }
@@ -163,7 +163,7 @@ static void settings_load_or_default(void) {
                 g_min_v = v1->min_v;
                 g_max_v = v1->max_v;
                 g_hrs_capacity = 10.0f;
-                g_chg_threshold_a = 0.05f;
+                g_chg_threshold_a = -0.05f;
             }
         }
     }
